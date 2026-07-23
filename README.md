@@ -40,7 +40,7 @@ throughput, and sniffs the file type. The node is exposed as `window.weeb3`
 | File | Role |
 |---|---|
 | `src/useSwarmNode.js` | Singleton boot (`init()` → `new Weeb3No103()` → `start()`), StrictMode-safe; polls `readyState(1,0)` for live peer counts. |
-| `src/erasureJoiner.js` | **The key piece.** Erasure-aware joiner over `retrieveChunk`: `DecodeSpan` (mask the level flag), walk DATA refs, skip PARITY. |
+| `src/erasureJoiner.js` | **The key piece.** Erasure-aware joiner over `retrieveChunk`, using **swarm-core**'s canonical erasure math (`@upcoming/swarm-core`: `decodeRedundancyLevel`, `referenceCount`) — with our own **parallel fetch** (swarm-core's own `ChunkJoiner` is sequential, too slow for streaming) and, crucially, **Reed-Solomon reconstruction**: when a data chunk is unreachable, it fetches the node's parity chunks and recovers the missing shard via `rsDecode`. |
 | `src/App.jsx` | Status panel + reconstruct form with live chunk progress and throughput. |
 | `vite.config.js` | wasm plugins + required **COOP/COEP** cross-origin-isolation headers. |
 
@@ -77,8 +77,19 @@ chequebook/SWAP issue and **not** primarily a peer-reachability issue.
 
 Paste a stream link (`…/#/watch/video/<owner>/<uuid>`, e.g. from
 `streamoverswarm.eth.limo` or `swarm.beebridge.buzz`) and it **plays via the
-in-browser node** — verified end-to-end in real Chrome (video decodes and plays;
-each segment fetched over p2p and erasure-decoded on the fly).
+in-browser node** — verified end-to-end in real Chrome for multiple streams
+(video decodes and plays; each segment fetched over p2p and erasure-decoded on
+the fly, **reconstructing unreachable chunks from parity** where needed).
+
+**Reliability via Reed-Solomon.** A browser light node can't always route to
+every chunk's neighborhood. When a data chunk is unreachable, the joiner fetches
+that node's parity chunks and reconstructs the missing shard (swarm-core's
+`rsDecode`) — the same resilience a Bee gateway has. This is what makes streams
+play reliably instead of only when every chunk happens to be reachable. A
+low-bitrate stream plays smoothly (buffer races ahead); a high-bitrate one
+(≈900 KB/s) still rebuffers because that exceeds a browser light node's
+retrieval throughput (~500–600 KB/s) — a connectivity ceiling, not an erasure
+problem.
 
 Flow (all through `retrieveChunk`, no gateway):
 
@@ -101,12 +112,18 @@ rebuffering. See tuning below.
 | `src/swarmFeed.js` | Watch-URL parse, topic/identifier/SOC-address derivation, feed-index discovery, SOC→playlist resolution. |
 | `src/swarmHlsLoader.js` | hls.js fragment loader that fetches segments via the node + joiner. |
 
+## Erasure coding & Reed-Solomon (swarm-core)
+
+The canonical erasure math and the **`rsDecode`** used for reconstruction live in
+**swarm-core** (`@upcoming/swarm-core@^0.0.2`). `rsDecode` (the inverse of the
+existing `rsEncode`) is GF(2^8) systematic Reed-Solomon erasure decode via matrix
+inversion, klauspost/reedsolomon-compatible, with round-trip tests.
+
 ## Next steps
 
-1. **Throughput for smooth realtime**: prefetch segments in parallel, raise joiner
-   concurrency, and enable the IndexedDB chunk store (`enableChunkStore`) so
-   re-watches are instant.
-2. Add **Reed-Solomon** decoding to the joiner for resilience when some data
-   chunks are unreachable (currently relies on all data chunks being available).
-3. Upstream `DecodeSpan` into weeb-3's/hoverfly's built-in joiner so
-   `retrieveBytes`/`fetch` handle erasure coding directly.
+1. **Throughput for smooth high-bitrate realtime**: the remaining limit is a
+   browser light node's retrieval rate (~500–600 KB/s) vs. high-bitrate streams
+   (~900 KB/s). Levers: more/curated wss forwarders, IndexedDB chunk store
+   (`enableChunkStore`) for instant re-watch, tuned segment prefetch.
+2. Upstream `decodeRedundancyLevel`/erasure handling into weeb-3's built-in
+   joiner so plain `retrieveBytes` handles erasure coding directly.
