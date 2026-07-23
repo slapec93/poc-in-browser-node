@@ -1,0 +1,25 @@
+{
+  "name": "poc-in-browser-node",
+  "private": true,
+  "version": "0.0.1",
+  "type": "module",
+  "description": "POC: in-browser Swarm light node (weeb-3) — bootstrap on tab creation and reconstruct an erasure-coded bytes address client-side via retrieveChunk.",
+  "scripts": {
+    "dev": "vite",
+    "build": "vite build",
+    "preview": "vite preview"
+  },
+  "dependencies": {
+    "@lat-murmeldjur/weeb_3": "0.0.320001",
+    "hls.js": "^1.5.17",
+    "js-sha3": "^0.9.3",
+    "react": "^18.3.1",
+    "react-dom": "^18.3.1"
+  },
+  "devDependencies": {
+    "@vitejs/plugin-react": "^4.3.4",
+    "vite": "^5.4.11",
+    "vite-plugin-top-level-await": "^1.4.4",
+    "vite-plugin-wasm": "^3.3.0"
+  }
+}
