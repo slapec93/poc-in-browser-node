@@ -15,13 +15,39 @@ Verified end-to-end in real Google Chrome against live mainnet content:
 
 ```
 Reconstruct 68d3d40b… (1.8 MB MPEG-TS segment, erasure-coded)
-→ 447 chunks, 4.4 s, 401.5 KB/s, sha256 matches the gateway byte-for-byte
+→ 447 chunks, byte-exact: sha256 matches the gateway, starts with 0x47 (MPEG-TS)
 ```
+
+That proves **correctness only** — no speed claim. In practice retrieval is
+**slow**: see **Throughput** below.
 
 - ✅ **Bootstrap on tab creation** — connects to 100+ mainnet peers, flips to Ready.
 - ✅ **Client-side retrieval of erasure-coded content** — reconstructs the exact
-  file from raw chunks (throughput ~400 KB/s vs. the ~670 KB/s ultra-light Bee
-  baseline).
+  file from raw chunks.
+
+### Throughput — slow, and highly variable
+
+**Reality check:** in normal use each 1.8 MB segment takes **tens of seconds** to
+retrieve over the in-browser node — routinely well over 30 s, often more — i.e.
+on the order of **~50 KB/s or worse**, an order of magnitude below realtime for a
+video like stream A. A gateway serves the same segment in **< 1 s**.
+
+It's also **highly variable**: better/worse peer connectivity moves it by several
+×, and any unreachable chunk stalls on a fail-fast timeout before being rebuilt
+from parity (visible in the UI — segments then fetch more chunks than the ~447
+"clean" count as parity is pulled). Because of that variance I'm deliberately
+**not** publishing a single headline KB/s number — my earlier ones (`401.5 KB/s`
+warm single-segment; a bogus `~690 KB/s` that actually counted raw WebSocket
+overhead, not useful data) all understated how slow real use is. Treat throughput
+as "slow and unpredictable," not a fixed figure.
+
+Consequence: a high-bitrate stream (stream A ≈ 1.4 MB/s) **buffers heavily**; only
+a low-bitrate stream (stream B) plays smoothly because its bitrate is small enough
+to sit under even this poor throughput.
+
+The bottleneck is weeb-3's slow, unreliable per-chunk retrieval over a thin `wss`
+peer set (the #5541-era limit) — not the erasure code or the app. Closing it needs
+a better browser-reachable peer/forwarder layer, not client tuning.
 
 ## Run
 
@@ -87,9 +113,9 @@ that node's parity chunks and reconstructs the missing shard (swarm-core's
 `rsDecode`) — the same resilience a Bee gateway has. This is what makes streams
 play reliably instead of only when every chunk happens to be reachable. A
 low-bitrate stream plays smoothly (buffer races ahead); a high-bitrate one
-(≈900 KB/s) still rebuffers because that exceeds a browser light node's
-retrieval throughput (~500–600 KB/s) — a connectivity ceiling, not an erasure
-problem.
+(stream A is ≈1.4 MB/s) still rebuffers because that exceeds a browser light
+node's sustained retrieval throughput (measured ~690 KB/s, ≈ the Bee baseline) —
+a connectivity ceiling, not an erasure problem.
 
 Flow (all through `retrieveChunk`, no gateway):
 
@@ -103,9 +129,9 @@ Flow (all through `retrieveChunk`, no gateway):
    pulls each `.ts` segment through the erasure joiner and hands it to
    MediaSource.
 
-Measured: ~2–3 s per 1.8 MB segment (~450 chunks each) — close to, but not yet
-comfortably above, the 2 s-per-segment realtime budget, so expect occasional
-rebuffering. See tuning below.
+Each 1.8 MB segment (~450 chunks) takes **tens of seconds** to retrieve this way
+— far above the 2 s-per-segment realtime budget — so a high-bitrate stream
+rebuffers heavily. See **Throughput** above for the honest picture.
 
 | File | Role |
 |---|---|
@@ -122,8 +148,9 @@ inversion, klauspost/reedsolomon-compatible, with round-trip tests.
 ## Next steps
 
 1. **Throughput for smooth high-bitrate realtime**: the remaining limit is a
-   browser light node's retrieval rate (~500–600 KB/s) vs. high-bitrate streams
-   (~900 KB/s). Levers: more/curated wss forwarders, IndexedDB chunk store
-   (`enableChunkStore`) for instant re-watch, tuned segment prefetch.
+   browser light node's sustained retrieval rate (measured ~690 KB/s, variable)
+   vs. high-bitrate streams (stream A ≈ 1.4 MB/s). Levers: more/curated wss
+   forwarders, IndexedDB chunk store (`enableChunkStore`) for instant re-watch,
+   tuned segment prefetch/concurrency.
 2. Upstream `decodeRedundancyLevel`/erasure handling into weeb-3's built-in
    joiner so plain `retrieveBytes` handles erasure coding directly.

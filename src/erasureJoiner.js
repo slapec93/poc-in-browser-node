@@ -101,7 +101,7 @@ function makeJoiner(retrieveChunk, opts) {
   // null. Used for erasure shards: since parity covers a miss, we must NOT wait
   // on weeb-3's slow give-up for an unreachable chunk — we fail fast and let
   // Reed-Solomon reconstruct from parity instead.
-  const shardTimeoutMs = opts.shardTimeoutMs ?? 4000;
+  const shardTimeoutMs = opts.shardTimeoutMs ?? 2500;
   async function fetchShard(hex) {
     try {
       const timeout = new Promise((r) => setTimeout(() => r(null), shardTimeoutMs));

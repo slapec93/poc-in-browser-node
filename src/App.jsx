@@ -89,6 +89,7 @@ export default function App() {
     }
     setStreaming(true);
     setSegLog([]);
+    if (typeof window !== "undefined") window.__streamStats = { bytes: 0, segs: 0, reconstructed: 0, t0: 0 };
     setStreamStatus("Discovering feed index…");
     try {
       const { index, text, segments } = await resolvePlaylist(
@@ -108,10 +109,19 @@ export default function App() {
         segConcurrency: 2,
         chunkConcurrency: 12,
         lookahead: 6,
-        onSegment: (s) =>
+        onSegment: (s) => {
+          if (typeof window !== "undefined") {
+            const st = window.__streamStats;
+            if (st) {
+              if (!st.t0) st.t0 = performance.now();
+              st.bytes += s.bytes;
+              st.segs++;
+            }
+          }
           setSegLog((l) =>
             [`${s.hex.slice(0, 8)}… · ${(s.bytes / 1024).toFixed(0)} KB · ${s.ms} ms · ${s.chunks} chunks`, ...l].slice(0, 8)
-          ),
+          );
+        },
       });
       const hls = new Hls({
         fLoader: SwarmLoader,
