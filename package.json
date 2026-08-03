@@ -3,16 +3,16 @@
   "private": true,
   "version": "0.0.1",
   "type": "module",
-  "description": "POC: in-browser Swarm light node (weeb-3) — bootstrap on tab creation and reconstruct an erasure-coded bytes address client-side via retrieveChunk.",
+  "description": "POC: in-browser Swarm light node (weeb-3) — bootstrap on tab creation; native erasure-decoding retrieval, feeds, and HLS streaming via the node's own API.",
   "scripts": {
     "dev": "vite",
     "build": "vite build",
     "preview": "vite preview"
   },
   "dependencies": {
-    "@lat-murmeldjur/weeb_3": "0.0.320001",
+    "@lat-murmeldjur/weeb_3": "0.0.324001",
     "@upcoming/swarm-core": "^0.0.2",
-    "hls.js": "^1.5.17",
+    "hls.js": "^1.6.16",
     "js-sha3": "^0.9.3",
     "react": "^18.3.1",
     "react-dom": "^18.3.1"

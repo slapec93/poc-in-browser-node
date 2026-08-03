@@ -3,10 +3,45 @@
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <title>Swarm in-browser node — POC</title>
+    <title>Swarm in-browser node — POC (weeb-3)</title>
   </head>
   <body>
     <div id="root"></div>
+    <!-- Debug: live registry of open WebSocket connections. Runs before the app
+         so it captures every socket the node opens. Only tracks open/close (no
+         per-frame work), so overhead is negligible. Console helpers:
+           wsCount()  -> number of open/connecting sockets
+           wsList()   -> [{ url, state }]  (state: 0 connecting,1 open,2 closing,3 closed)
+           wsByIp()   -> { "<ip>": count } for currently-open sockets -->
+    <script>
+      (function () {
+        const OrigWS = window.WebSocket;
+        const live = new Set();
+        window.WebSocket = new Proxy(OrigWS, {
+          construct(Target, args) {
+            const sock = new Target(...args);
+            live.add(sock);
+            const drop = () => live.delete(sock);
+            sock.addEventListener("close", drop);
+            sock.addEventListener("error", drop);
+            return sock;
+          },
+        });
+        window.__ws = live;
+        window.wsList = () => [...live].map((s) => ({ url: s.url, state: s.readyState }));
+        window.wsCount = () => live.size;
+        window.wsByIp = () => {
+          const out = {};
+          for (const s of live) {
+            if (s.readyState !== 1) continue; // OPEN only
+            const m = /\/\/(\d+)-(\d+)-(\d+)-(\d+)\./.exec(s.url);
+            const ip = m ? `${m[1]}.${m[2]}.${m[3]}.${m[4]}` : "other";
+            out[ip] = (out[ip] || 0) + 1;
+          }
+          return out;
+        };
+      })();
+    </script>
     <script type="module" src="/src/main.jsx"></script>
   </body>
 </html>
