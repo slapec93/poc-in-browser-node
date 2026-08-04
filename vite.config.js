@@ -12,6 +12,7 @@ const crossOriginIsolation = {
 };
 
 export default defineConfig({
+  base: "./",
   plugins: [react(), wasm(), topLevelAwait()],
   // Don't let Vite's dep pre-bundler touch the wasm glue — it breaks the
   // relative wasm URL resolution.
