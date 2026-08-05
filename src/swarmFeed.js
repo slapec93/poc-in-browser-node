@@ -122,6 +122,44 @@ export async function resolvePlaylist(owner, uuid, retrieveChunk, opts = {}) {
   return { index: latest.index, text, segments: parsePlaylistSegments(text) };
 }
 
+/**
+ * Live resolver for a growing feed. Returns `getManifest()` that yields the
+ * CURRENT playlist each call. The first call finds the latest index via the full
+ * search; later calls just probe FORWARD from the last-known index (cheap — a
+ * live feed grows ~1 index per segment), so hls.js reloads pick up new segments.
+ */
+export function makeLiveResolver(owner, uuid, retrieveChunk, opts = {}) {
+  const ownerBytes = hexToBytes(owner);
+  const topicBytes = hexToBytes(feedTopicHex(uuid));
+  const timeout = opts.probeTimeoutMs ?? 4000;
+  let lastIndex = -1;
+  let lastSoc = null;
+
+  return async function getManifest() {
+    if (lastIndex < 0) {
+      const latest = await resolveLatestUpdate(topicBytes, ownerBytes, retrieveChunk, opts);
+      if (!latest) throw new Error("stream feed not found on the network");
+      lastIndex = latest.index;
+      lastSoc = latest.soc;
+    } else {
+      let idx = lastIndex;
+      let soc = lastSoc;
+      for (;;) {
+        const next = await tryChunk(retrieveChunk, socAddressHex(topicBytes, ownerBytes, idx + 1), timeout);
+        if (!next) break;
+        idx += 1;
+        soc = next;
+      }
+      lastIndex = idx;
+      lastSoc = soc;
+    }
+    const { bytes } = await joinFromChunk(lastSoc, retrieveChunk, opts);
+    const text = new TextDecoder().decode(bytes);
+    if (!text.includes("#EXTM3U")) throw new Error("feed did not resolve to an HLS playlist");
+    return { index: lastIndex, text };
+  };
+}
+
 /** Extract segment references (bare hex) from an HLS playlist. */
 export function parsePlaylistSegments(text) {
   const segs = [];

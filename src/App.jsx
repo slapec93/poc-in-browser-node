@@ -1,8 +1,8 @@
 import { useEffect, useRef, useState } from "react";
 import Hls from "hls.js";
 import { useSwarmNode } from "./useSwarmNode.js";
-import { parseWatchUrl, resolvePlaylist } from "./swarmFeed.js";
-import { createSwarmStream } from "./swarmHlsLoader.js";
+import { parseWatchUrl, makeLiveResolver } from "./swarmFeed.js";
+import { createLiveLoaders } from "./swarmHlsLive.js";
 
 const EXAMPLE_STREAM =
   "https://streamoverswarm.eth.limo/#/watch/video/6F2728386F8a47ef5EBe323721188e630Ff0FdE9/0d216633-3475-4c26-8dd0-9935ef854bbc";
@@ -103,39 +103,41 @@ export default function App() {
     setSegLog([]);
     setStreamStatus("Resolving feed…");
     try {
-      const { index, text, segments } = await resolvePlaylist(
-        parsed.owner,
-        parsed.uuid,
-        (h) => node.retrieveChunk(h),
-        { onProbe: (i) => setStreamStatus(`Probing feed index ${i}…`) }
-      );
-      setStreamStatus(`Playlist @ index ${index}: ${segments.length} segments. Starting player…`);
       if (!Hls.isSupported()) {
         setStreamStatus("hls.js/MediaSource not supported in this browser.");
         return;
       }
-      hlsRef.current?.destroy();
-      const { SwarmLoader } = createSwarmStream(
-        segments,
-        (h) => retrieveContent(node, h), // native erasure-decoded segment bytes
+      // Live-capable: the playlist loader re-resolves the feed on every hls.js
+      // reload, so new segments of a live stream appear. Works for VOD too
+      // (an #EXT-X-ENDLIST playlist just isn't reloaded).
+      const getManifest = makeLiveResolver(parsed.owner, parsed.uuid, (h) => node.retrieveChunk(h), {
+        onProbe: (i) => setStreamStatus(`Probing feed index ${i}…`),
+      });
+      const { PlaylistLoader, FragmentLoader } = createLiveLoaders(
+        getManifest,
+        (ref) => retrieveContent(node, ref), // native erasure-decoded segment bytes
         {
-          segConcurrency: 3,
-          lookahead: 8,
-          onSegment: (s) =>
-            setSegLog((l) => [`${s.hex.slice(0, 8)}… · ${(s.bytes / 1024).toFixed(0)} KB · ${s.ms} ms`, ...l].slice(0, 8)),
+          onManifest: ({ index }) => setStreamStatus(`Live — feed index ${index}, served by the in-browser node.`),
+          onSegment: (s) => setSegLog((l) => [`${s.hex.slice(0, 8)}… · ${(s.bytes / 1024).toFixed(0)} KB · ${s.ms} ms`, ...l].slice(0, 8)),
         }
       );
-      const hls = new Hls({ fLoader: SwarmLoader, enableWorker: true, maxBufferLength: 30, maxMaxBufferLength: 120 });
+      hlsRef.current?.destroy();
+      const hls = new Hls({
+        pLoader: PlaylistLoader,
+        fLoader: FragmentLoader,
+        enableWorker: true,
+        maxBufferLength: 20,
+        maxMaxBufferLength: 60,
+        liveSyncDurationCount: 3,
+      });
       hlsRef.current = hls;
-      const blobUrl = URL.createObjectURL(new Blob([text], { type: "application/vnd.apple.mpegurl" }));
       hls.on(Hls.Events.MANIFEST_PARSED, () => {
-        setStreamStatus(`Playing — index ${index}, ${segments.length} segments, served by the in-browser node.`);
         videoRef.current?.play().catch(() => {});
       });
       hls.on(Hls.Events.ERROR, (_evt, data) => {
         if (data.fatal) setStreamStatus(`HLS error: ${data.details}`);
       });
-      hls.loadSource(blobUrl);
+      hls.loadSource("https://swarm.local/live.m3u8");
       hls.attachMedia(videoRef.current);
     } catch (err) {
       setStreamStatus(`Failed: ${err instanceof Error ? err.message : String(err)}`);
