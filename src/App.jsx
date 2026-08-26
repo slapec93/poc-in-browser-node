@@ -3,6 +3,7 @@ import Hls from "hls.js";
 import { useSwarmNode } from "./useSwarmNode.js";
 import { parseWatchUrl, makeLiveResolver } from "./swarmFeed.js";
 import { createLiveLoaders } from "./swarmHlsLive.js";
+import { trackPlayback } from "./telemetry.js";
 
 const EXAMPLE_STREAM =
   "https://streamoverswarm.eth.limo/#/watch/video/6F2728386F8a47ef5EBe323721188e630Ff0FdE9/0d216633-3475-4c26-8dd0-9935ef854bbc";
@@ -85,11 +86,15 @@ export default function App() {
   // ---- stream playback (feed via SOC probing, segments via native retrieveBytes) ----
   const videoRef = useRef(null);
   const hlsRef = useRef(null);
+  const trackerRef = useRef(null);
   const [streamUrl, setStreamUrl] = useState(EXAMPLE_STREAM);
   const [streamStatus, setStreamStatus] = useState(null);
   const [streaming, setStreaming] = useState(false);
   const [segLog, setSegLog] = useState([]);
-  useEffect(() => () => hlsRef.current?.destroy(), []);
+  useEffect(() => () => {
+    trackerRef.current?.stop();
+    hlsRef.current?.destroy();
+  }, []);
 
   async function handlePlay(e) {
     e.preventDefault();
@@ -122,6 +127,9 @@ export default function App() {
         }
       );
       hlsRef.current?.destroy();
+      // One tracker per playback attempt; the previous one flushes its `end` row.
+      trackerRef.current?.stop();
+      trackerRef.current = trackPlayback(videoRef.current, { vid: parsed.uuid });
       const hls = new Hls({
         pLoader: PlaylistLoader,
         fLoader: FragmentLoader,

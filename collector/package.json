@@ -1,5 +1,5 @@
 {
-  "name": "zartkor-collector",
+  "name": "streaming-poc-collector",
   "private": true,
   "type": "module",
   "scripts": {

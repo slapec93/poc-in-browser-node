@@ -52,8 +52,8 @@ async function collect(request, env) {
     // distribution list and keeps this defensible without a consent banner.
     type: String(ev.type),
     vid: str(ev.vid, 64),
-    label: str(ev.label, 40) || "(nincs)",
-    gw: str(ev.gw, 80),
+    label: str(ev.label, 40) || "(none)",
+    gw: str(ev.gw, 80) || "(unknown)",
     country: String(cf.country || "??"),
     sid: str(ev.sid, 40),
     watched: num(ev.watched), depth: num(ev.depth), dur: num(ev.dur),
@@ -177,6 +177,11 @@ function render(d) {
   const opened = Number(f.opened) || 0;
   const dur = Number(w.dur) || 0;
 
+  // Ranked lists: bar length is relative to the leader, not to a session total —
+  // these are magnitude comparisons within the list, not parts of a whole.
+  const gwMax = Number(d.gateways[0]?.sessions) || 0;
+  const ctMax = Number(d.countries[0]?.sessions) || 0;
+
   const steps = [
     ["Opened", f.opened], ["Started", f.started],
     ["25%", f.m25], ["50%", f.m50], ["75%", f.m75], ["Completed", f.m100]
@@ -212,7 +217,7 @@ function render(d) {
       <tr><th>Median reach</th><td class=num>${Math.round((Number(w.med_depth) || 0) * 100)}%</td><td></td></tr>
       <tr><th>Closed sessions</th><td class=num>${n0(w.n)}</td><td></td></tr>
     </table>
-    <p class=note>Play time = actual playback, in wall-clock seconds. Reach = the furthest point reached. High reach with short play time is scrubbing, not watching.</p>
+    <p class=note>Play time = content actually played, in seconds (stalls and scrubs excluded). Reach = the furthest point reached. High reach with short play time is scrubbing, not watching.</p>
   </section>
 
   <section>
@@ -233,12 +238,14 @@ function render(d) {
   <div class=cols>
     <section>
       <h2>Gateways</h2>
-      <table>${d.gateways.map(r => `<tr><td>${esc(r.gw)}</td><td class=num>${n0(r.sessions)}</td></tr>`).join("") || "<tr><td class=note>—</td></tr>"}</table>
+      <table>${d.gateways.map(r => `<tr><td>${esc(r.gw)}</td><td class=num>${n0(r.sessions)}</td>
+        <td class=barcell-sm>${bar(r.sessions, gwMax)}</td></tr>`).join("") || "<tr><td class=note>—</td></tr>"}</table>
       <p class=note>The gateway they actually reached it through.</p>
     </section>
     <section>
       <h2>Countries</h2>
-      <table>${d.countries.map(r => `<tr><td>${esc(r.country)}</td><td class=num>${n0(r.sessions)}</td></tr>`).join("") || "<tr><td class=note>—</td></tr>"}</table>
+      <table>${d.countries.map(r => `<tr><td>${esc(r.country)}</td><td class=num>${n0(r.sessions)}</td>
+        <td class=barcell-sm>${bar(r.sessions, ctMax)}</td></tr>`).join("") || "<tr><td class=note>—</td></tr>"}</table>
     </section>
   </div>
 
@@ -291,7 +298,7 @@ tr:last-child td,tr:last-child th{border-bottom:0}
 th{font-size:13px;color:var(--ink)}
 .hdr th{font-size:9.5px;font-weight:600;text-transform:uppercase;letter-spacing:.1em;color:var(--muted)}
 .num{text-align:right;font-family:var(--mono);font-variant-numeric:tabular-nums;white-space:nowrap}
-.barcell{width:32%}
+.barcell{width:32%}\n.barcell-sm{width:34%;padding-left:12px}
 .bar{display:block;height:10px;background:var(--track);border-radius:0 5px 5px 0}
 .bar i{display:block;height:100%;background:var(--accent);border-radius:0 4px 4px 0}
 .small td{font-size:12.5px;color:var(--ink2)}
@@ -301,7 +308,7 @@ border-top:1px solid var(--line);line-height:1.65}
 .err{background:rgba(254,110,0,.08);border:1px solid var(--line);border-left:3px solid var(--accent);
 border-radius:8px;color:var(--ink);padding:14px;font-size:13px;word-break:break-word}
 .cols{display:grid;grid-template-columns:1fr 1fr;gap:0 16px}
-@media(max-width:560px){.cols{grid-template-columns:1fr}.barcell{display:none}}
+@media(max-width:560px){.cols{grid-template-columns:1fr}.barcell,.barcell-sm{display:none}}
 a{color:var(--accent);text-decoration:none;border-bottom:1px solid rgba(254,110,0,.45)}
 a:hover{border-bottom-color:var(--accent)}
 code{font-family:var(--mono);font-size:12px}
@@ -316,6 +323,9 @@ function cors() {
     "Access-Control-Allow-Origin": "*",
     "Access-Control-Allow-Methods": "POST, OPTIONS",
     "Access-Control-Allow-Headers": "Content-Type",
-    "Access-Control-Max-Age": "86400"
+    "Access-Control-Max-Age": "86400",
+    // The player page is cross-origin isolated (COEP: require-corp). A no-cors
+    // beacon (sendBeacon fallback) is blocked there without this header.
+    "Cross-Origin-Resource-Policy": "cross-origin"
   };
 }
