@@ -1,0 +1,7 @@
+name = "streaming-poc-collector"
+main = "src/index.js"
+compatibility_date = "2026-01-01"
+
+[[analytics_engine_datasets]]
+binding = "ANALYTICS_ENGINE"
+dataset = "SwarmStreamingTelemetry"
