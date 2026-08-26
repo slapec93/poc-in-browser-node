@@ -10,7 +10,7 @@
     "preview": "vite preview"
   },
   "dependencies": {
-    "@lat-murmeldjur/weeb_3": "0.0.324001",
+    "@lat-murmeldjur/weeb_3": "0.0.338001",
     "@upcoming/swarm-core": "^0.0.2",
     "hls.js": "^1.6.16",
     "js-sha3": "^0.9.3",
