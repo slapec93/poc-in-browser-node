@@ -24,7 +24,20 @@ const ENDPOINT =
 // Media-time jumps larger than this are treated as a seek, not as watching.
 const SEEK_THRESHOLD_S = 2;
 const HEARTBEAT_MS = 30_000;
+// Stall detection polls instead of trusting `waiting`: hls.js recovers buffer
+// gaps by nudging currentTime, which fires seeking/seeked and makes real
+// rebuffers look like user seeks. Comparing media-time advanced against
+// wall-clock elapsed is immune to however the player recovers.
+const STALL_POLL_MS = 1000;
+// Playing normally advanced/elapsed is ~1. A generous threshold on a 1s window
+// keeps ordinary timer jitter from registering as a stutter; the cost is that
+// hangs shorter than a few hundred ms go uncounted, which is the right trade —
+// a false "your stream is stuttering" is worse than missing a blink.
+const STALL_RATIO = 0.25;
 const MARKS = [25, 50, 75];
+
+const perfNow = () =>
+  (globalThis.performance?.now ? performance.now() : Date.now());
 
 function newSid() {
   if (globalThis.crypto?.randomUUID) return crypto.randomUUID();
@@ -84,6 +97,14 @@ export function trackPlayback(video, meta) {
   let watched = 0;
   let depth = 0;
   let seeks = 0;
+  // Rebuffering. `stalls` counts interruptions after playback has started;
+  // `stalledSec` is how long they lasted in total. `ttffSec` is the wait before
+  // the first frame — startup hang, which viewers feel as much as a mid-stream
+  // stutter but is a different thing, so it is measured separately.
+  let stalls = 0;
+  let stalledSec = 0;
+  let ttffSec = 0;
+  const attachedAt = perfNow();
   let lastTime = video.currentTime || 0;
   let started = false;
   let completed = false;
@@ -103,6 +124,11 @@ export function trackPlayback(video, meta) {
       dur: Math.round(dur * 10) / 10,
       seeks,
       mark,
+      // Appended fields — the Worker schema is positional, so these must stay
+      // in this order and new ones go on the end.
+      stalls,
+      stalled: Math.round(stalledSec * 10) / 10,
+      ttff: Math.round(ttffSec * 100) / 100,
     });
   }
 
@@ -134,13 +160,16 @@ export function trackPlayback(video, meta) {
   function onPlaying() {
     if (!started) {
       started = true;
+      if (!ttffSec) ttffSec = (perfNow() - attachedAt) / 1000;
       send("start");
     }
+    startPolling();
     if (!hbTimer) hbTimer = setInterval(() => send("heartbeat"), HEARTBEAT_MS);
   }
 
   function onPause() {
     if (video.seeking || video.ended) return; // seek-scrub and ended aren't pauses
+    stopPolling();
     stopHeartbeat();
     send("pause");
   }
@@ -148,9 +177,68 @@ export function trackPlayback(video, meta) {
   function onSeeked() {
     seeks += 1;
     lastTime = video.currentTime;
+    // Re-baseline the poller so the jump reads as neither progress nor a hang.
+    pollAtTime = video.currentTime;
+    pollAtWall = perfNow();
+  }
+
+  // `waiting` is the rebuffer signal: playback wanted to continue and couldn't.
+  // Before `start` it is normal startup buffering (covered by ttff), and during
+  // a seek it is the seek's own buffering — neither is a stutter.
+  // Poll-based hang detection: runs only while playback is meant to be
+  // progressing. A paused, ended or seeking element is not hanging.
+  let pollTimer = null;
+  let pollAtTime = 0;
+  let pollAtWall = 0;
+  let inHang = false;
+
+  function pollStall() {
+    const now = perfNow();
+    const t = video.currentTime;
+    const elapsed = (now - pollAtWall) / 1000;
+    const advanced = t - pollAtTime;
+    pollAtWall = now;
+    pollAtTime = t;
+    if (!started || video.paused || video.ended || video.seeking || elapsed <= 0) {
+      inHang = false;
+      return;
+    }
+    // Duration is the *deficit* — wall-clock that elapsed minus content that
+    // played — so a window straddling the start of a hang contributes its
+    // stalled part instead of being credited or dropped whole. Ignore sub-150ms
+    // deficits: that is timer jitter, not a stutter.
+    const rate = video.playbackRate || 1;
+    const deficit = elapsed - advanced / rate;
+    if (deficit > 0.15) stalledSec += deficit;
+    // The event count is separate: only a clearly frozen window opens a stall.
+    if (advanced < elapsed * STALL_RATIO) {
+      if (!inHang) {
+        inHang = true;
+        stalls += 1;
+      }
+    } else {
+      inHang = false;
+    }
+  }
+
+  function startPolling() {
+    if (pollTimer) return;
+    pollAtWall = perfNow();
+    pollAtTime = video.currentTime;
+    inHang = false;
+    pollTimer = setInterval(pollStall, STALL_POLL_MS);
+  }
+
+  function stopPolling() {
+    if (pollTimer) {
+      clearInterval(pollTimer);
+      pollTimer = null;
+    }
+    inHang = false;
   }
 
   function onEnded() {
+    stopPolling();
     if (!completed) {
       completed = true;
       send("complete");
@@ -190,6 +278,10 @@ export function trackPlayback(video, meta) {
     if (stopped) return;
     stopped = true;
     stopHeartbeat();
+    // Bank any hang still in progress: a viewer who gives up mid-stall would
+    // otherwise report zero, making the worst case read as the best.
+    pollStall();
+    stopPolling();
     send("end");
     video.removeEventListener("timeupdate", onTimeUpdate);
     video.removeEventListener("playing", onPlaying);

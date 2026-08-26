@@ -21,6 +21,7 @@
    ---- Schema (positional, do not reorder) ----
      blob1 type   blob2 vid   blob3 label   blob4 gateway   blob5 country   blob6 session
      double1 watched   double2 depth   double3 duration   double4 seeks   double5 mark
+     double6 stalls    double7 stalled_seconds            double8 time_to_first_frame
    ============================================================ */
 
 const DATASET = "SwarmStreamingTelemetry";
@@ -57,7 +58,11 @@ async function collect(request, env) {
     country: String(cf.country || "??"),
     sid: str(ev.sid, 40),
     watched: num(ev.watched), depth: num(ev.depth), dur: num(ev.dur),
-    seeks: num(ev.seeks), mark: num(ev.mark)
+    seeks: num(ev.seeks), mark: num(ev.mark),
+    // Appended 2026-08-26. Rows written before this carry no double6-8 and read
+    // back as 0, which is indistinguishable from "never stalled" — see the note
+    // rendered under the Stalling section.
+    stalls: num(ev.stalls), stalled: num(ev.stalled), ttff: num(ev.ttff)
   };
 
   console.log(JSON.stringify(row));
@@ -65,7 +70,8 @@ async function collect(request, env) {
   if (env.ANALYTICS_ENGINE) {
     env.ANALYTICS_ENGINE.writeDataPoint({
       blobs: [row.type, row.vid, row.label, row.gw, row.country, row.sid],
-      doubles: [row.watched, row.depth, row.dur, row.seeks, row.mark],
+      doubles: [row.watched, row.depth, row.dur, row.seeks, row.mark,
+                row.stalls, row.stalled, row.ttff],
       indexes: [row.vid]
     });
   }
@@ -123,6 +129,32 @@ async function stats(url, env) {
              SUM(_sample_interval)                                   AS n
       FROM ${DATASET} WHERE blob1='end' AND ${since}`);
 
+    // Stalling, read from `end` rows only — they carry the final per-session
+    // totals, so counting any other event type would multiply-count one session.
+    const [stall] = await sql(env, `
+      SELECT sumIf(_sample_interval, double6 > 0)                     AS sessions_stalled,
+             SUM(_sample_interval)                                    AS sessions,
+             SUM(_sample_interval * double6)                          AS total_stalls,
+             SUM(_sample_interval * double7)                          AS total_stalled,
+             SUM(_sample_interval * double1)                          AS total_watched,
+             quantileExactWeighted(0.5)(double7, _sample_interval)    AS med_stalled,
+             MAX(double7)                                             AS worst_stalled,
+             quantileExactWeighted(0.5)(double8, _sample_interval)    AS med_ttff
+      FROM ${DATASET} WHERE blob1='end' AND ${since}`);
+
+    // Per-session stalling, including sessions still playing. Heartbeats carry
+    // running totals, so MAX() per session gives the latest value without
+    // multiply-counting; `end` rows are the final value for finished sessions.
+    const sessions = await sql(env, `
+      SELECT blob6 AS sid, blob3 AS label,
+             MAX(double6) AS stalls,
+             MAX(double7) AS stalled,
+             MAX(double1) AS watched,
+             sumIf(_sample_interval, blob1='end') AS ended
+      FROM ${DATASET} WHERE blob1 IN ('heartbeat','end','pause','progress','complete') AND ${since}
+      GROUP BY sid, label
+      ORDER BY stalled DESC, watched DESC LIMIT 12`);
+
     const labels = await sql(env, `
       SELECT blob3 AS label,
              count(DISTINCT blob6)                     AS sessions,
@@ -146,7 +178,7 @@ async function stats(url, env) {
              double1 AS watched, double2 AS depth
       FROM ${DATASET} WHERE ${since} ORDER BY timestamp DESC LIMIT 25`);
 
-    return html(page(render({ k: key, days, funnel, watch, labels, gateways, countries, recent })));
+    return html(page(render({ k: key, days, funnel, watch, stall, sessions, labels, gateways, countries, recent })));
   } catch (e) {
     return html(page(`<p class=err>${esc(e.message)}</p>`), 500);
   }
@@ -181,6 +213,19 @@ function render(d) {
   // these are magnitude comparisons within the list, not parts of a whole.
   const gwMax = Number(d.gateways[0]?.sessions) || 0;
   const ctMax = Number(d.countries[0]?.sessions) || 0;
+
+  const st = d.stall || {};
+  const endedSessions = Number(st.sessions) || 0;
+  const totalStalls = Number(st.total_stalls) || 0;
+  const totalWatched = Number(st.total_watched) || 0;
+  const perSession = endedSessions ? totalStalls / endedSessions : 0;
+  const perMinute = totalWatched ? totalStalls / (totalWatched / 60) : 0;
+  // Share of the session spent stalled, medians over sessions (not a ratio of sums).
+  const medWatched = Number(w.med_watched) || 0;
+  const medStalled = Number(st.med_stalled) || 0;
+  const medShare = medWatched + medStalled > 0
+    ? Math.round((medStalled / (medWatched + medStalled)) * 100) + "% of session"
+    : "—";
 
   const steps = [
     ["Opened", f.opened], ["Started", f.started],
@@ -218,6 +263,41 @@ function render(d) {
       <tr><th>Closed sessions</th><td class=num>${n0(w.n)}</td><td></td></tr>
     </table>
     <p class=note>Play time = content actually played, in seconds (stalls and scrubs excluded). Reach = the furthest point reached. High reach with short play time is scrubbing, not watching.</p>
+  </section>
+
+  <section>
+    <h2>Stalling</h2>
+    <table>
+      <tr><th>Sessions that stalled</th><td class=num>${n0(st.sessions_stalled)}</td>
+          <td class=num>${pct(st.sessions_stalled, st.sessions)}</td>
+          <td class=barcell>${bar(st.sessions_stalled, st.sessions)}</td></tr>
+      <tr><th>Stalls per session</th><td class=num>${n1(perSession)}</td><td></td><td></td></tr>
+      <tr><th>Stalls per minute watched</th><td class=num>${n1(perMinute)}</td><td></td><td></td></tr>
+      <tr><th>Median time stalled</th><td class=num>${n1(st.med_stalled)} s</td>
+          <td class=num>${medShare}</td><td></td></tr>
+      <tr><th>Worst session</th><td class=num>${n1(st.worst_stalled)} s</td><td></td><td></td></tr>
+      <tr><th>Median startup wait</th><td class=num>${n1(st.med_ttff)} s</td><td></td><td></td></tr>
+    </table>
+    <p class=note>Aggregates above count <strong>finished</strong> sessions only —
+    a session still playing has no final row yet. The table below includes sessions in
+    flight, read from their heartbeats.</p>
+    <h3 style="font-size:10.5px;font-weight:600;text-transform:uppercase;letter-spacing:.12em;color:var(--muted);margin:16px 0 8px">Per session</h3>
+    ${d.sessions.length ? `<table>
+      <tr class=hdr><th>Session</th><th>Label</th><th class=num>Stalls</th>
+          <th class=num>Stalled</th><th class=num>Watched</th><th class=num>State</th></tr>
+      ${d.sessions.map(r => `<tr>
+        <td><code>${esc(String(r.sid).slice(0, 8))}</code></td>
+        <td>${esc(r.label)}</td>
+        <td class=num>${n0(r.stalls)}</td>
+        <td class=num>${n1(r.stalled)} s</td>
+        <td class=num>${n1(r.watched)} s</td>
+        <td class=num>${Number(r.ended) > 0 ? "ended" : "playing"}</td></tr>`).join("")}
+    </table>` : `<p class=note>No sessions yet.</p>`}
+    <p class=note>A stall is playback stopping when it wanted to continue — seeks and
+    initial buffering excluded, the latter counted as startup wait instead. “Per minute
+    watched” is the figure to trust when comparing periods: raw counts rise simply because
+    people watched longer. Sessions recorded before stall tracking shipped carry no value
+    and read as zero, so early periods look calmer than they were.</p>
   </section>
 
   <section>
