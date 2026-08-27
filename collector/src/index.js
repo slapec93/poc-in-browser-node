@@ -22,6 +22,7 @@
      blob1 type   blob2 vid   blob3 label   blob4 gateway   blob5 country   blob6 session
      double1 watched   double2 depth   double3 duration   double4 seeks   double5 mark
      double6 stalls    double7 stalled_seconds            double8 time_to_first_frame
+     double9 peer_count
    ============================================================ */
 
 const DATASET = "SwarmStreamingTelemetry";
@@ -33,6 +34,7 @@ export default {
     if (request.method === "OPTIONS") return new Response(null, { status: 204, headers: cors() });
     if (url.pathname === "/e" && request.method === "POST") return collect(request, env);
     if (url.pathname === "/stats") return stats(url, env);
+    if (url.pathname === "/export") return exportRows(url, env);
     return new Response("not found", { status: 404, headers: cors() });
   }
 };
@@ -59,10 +61,9 @@ async function collect(request, env) {
     sid: str(ev.sid, 40),
     watched: num(ev.watched), depth: num(ev.depth), dur: num(ev.dur),
     seeks: num(ev.seeks), mark: num(ev.mark),
-    // Appended 2026-08-26. Rows written before this carry no double6-8 and read
-    // back as 0, which is indistinguishable from "never stalled" — see the note
-    // rendered under the Stalling section.
-    stalls: num(ev.stalls), stalled: num(ev.stalled), ttff: num(ev.ttff)
+    // Appended 2026-08-26. Older rows read back as 0, not null.
+    stalls: num(ev.stalls), stalled: num(ev.stalled), ttff: num(ev.ttff),
+    peers: num(ev.peers)
   };
 
   console.log(JSON.stringify(row));
@@ -71,7 +72,7 @@ async function collect(request, env) {
     env.ANALYTICS_ENGINE.writeDataPoint({
       blobs: [row.type, row.vid, row.label, row.gw, row.country, row.sid],
       doubles: [row.watched, row.depth, row.dur, row.seeks, row.mark,
-                row.stalls, row.stalled, row.ttff],
+                row.stalls, row.stalled, row.ttff, row.peers],
       indexes: [row.vid]
     });
   }
@@ -103,8 +104,9 @@ async function stats(url, env) {
     return html(page("<p class=err>Set CF_ACCOUNT_ID and CF_API_TOKEN as Worker secrets first.</p>"), 500);
   }
 
-  const days = Math.min(90, Math.max(1, parseInt(url.searchParams.get("d") || "30", 10)));
-  const since = `timestamp > NOW() - INTERVAL '${days}' DAY`;
+  const range = parseRange(url);
+  const since = range.where;
+  const days = range.days;
 
   try {
     // Funnel. sumIf(_sample_interval, cond) is the sampling-correct way to
@@ -129,8 +131,7 @@ async function stats(url, env) {
              SUM(_sample_interval)                                   AS n
       FROM ${DATASET} WHERE blob1='end' AND ${since}`);
 
-    // Stalling, read from `end` rows only — they carry the final per-session
-    // totals, so counting any other event type would multiply-count one session.
+    // `end` rows only: they hold final per-session totals.
     const [stall] = await sql(env, `
       SELECT sumIf(_sample_interval, double6 > 0)                     AS sessions_stalled,
              SUM(_sample_interval)                                    AS sessions,
@@ -139,12 +140,12 @@ async function stats(url, env) {
              SUM(_sample_interval * double1)                          AS total_watched,
              quantileExactWeighted(0.5)(double7, _sample_interval)    AS med_stalled,
              MAX(double7)                                             AS worst_stalled,
-             quantileExactWeighted(0.5)(double8, _sample_interval)    AS med_ttff
+             quantileExactWeighted(0.5)(double8, _sample_interval)    AS med_ttff,
+             quantileExactWeighted(0.5)(double9, _sample_interval)    AS med_peers
       FROM ${DATASET} WHERE blob1='end' AND ${since}`);
 
-    // Per-session stalling, including sessions still playing. Heartbeats carry
-    // running totals, so MAX() per session gives the latest value without
-    // multiply-counting; `end` rows are the final value for finished sessions.
+    // Includes in-flight sessions. Heartbeats are cumulative, so MAX() per
+    // session is the latest value without multiply-counting.
     const sessions = await sql(env, `
       SELECT blob6 AS sid, blob3 AS label,
              MAX(double6) AS stalls,
@@ -178,10 +179,46 @@ async function stats(url, env) {
              double1 AS watched, double2 AS depth
       FROM ${DATASET} WHERE ${since} ORDER BY timestamp DESC LIMIT 25`);
 
-    return html(page(render({ k: key, days, funnel, watch, stall, sessions, labels, gateways, countries, recent })));
+    return html(page(render({ k: key, days, range, funnel, watch, stall, sessions, labels, gateways, countries, recent })));
   } catch (e) {
     return html(page(`<p class=err>${esc(e.message)}</p>`), 500);
   }
+}
+
+// Time range from ?from=&to= (datetime-local values), else ?d=<days>.
+// Values are re-serialised through Date, never interpolated raw: they land in
+// SQL, and this is the only user input that does.
+function parseRange(url) {
+  const clean = (v) => {
+    if (!v) return null;
+    const t = Date.parse(v.length <= 16 ? v + ":00" : v); // datetime-local has no seconds
+    if (Number.isNaN(t)) return null;
+    return new Date(t).toISOString().slice(0, 19).replace("T", " ");
+  };
+  const from = clean(url.searchParams.get("from"));
+  const to = clean(url.searchParams.get("to"));
+
+  if (from && to && from < to) {
+    return {
+      from, to,
+      days: null,
+      where: `timestamp >= toDateTime('${from}') AND timestamp < toDateTime('${to}')`,
+      label: `${from} → ${to} UTC`,
+    };
+  }
+  if (from && !to) {
+    return {
+      from, to: null, days: null,
+      where: `timestamp >= toDateTime('${from}')`,
+      label: `since ${from} UTC`,
+    };
+  }
+  const days = Math.min(90, Math.max(1, parseInt(url.searchParams.get("d") || "30", 10)));
+  return {
+    from: null, to: null, days,
+    where: `timestamp > NOW() - INTERVAL '${days}' DAY`,
+    label: `last ${days} days`,
+  };
 }
 
 function safeEqual(a, b) {
@@ -191,6 +228,95 @@ function safeEqual(a, b) {
   return d === 0;
 }
 
+/* ---------------- export ---------------- */
+
+// Analytics Engine is not an archive (~90 day retention, no delete), so raw
+// rows need a way out. GET /export?k=…&d=30&format=csv|json
+const EXPORT_COLUMNS = [
+  ["timestamp", "timestamp"], ["type", "blob1"], ["vid", "blob2"], ["label", "blob3"],
+  ["gateway", "blob4"], ["country", "blob5"], ["session", "blob6"],
+  ["watched_s", "double1"], ["depth", "double2"], ["duration_s", "double3"],
+  ["seeks", "double4"], ["mark", "double5"], ["stalls", "double6"],
+  ["stalled_s", "double7"], ["ttff_s", "double8"], ["peers", "double9"],
+];
+
+const MAX_EXPORT_ROWS = 10000;
+
+// Filename states the range the file covers, so a folder of exports stays
+// readable. Colons are dropped — they break filenames on some systems.
+function exportFilename(range, ext) {
+  const stamp = (v) => v.replace(/[-:]/g, "").replace(" ", "T"); // 20260827T060000
+  const now = () => new Date().toISOString().slice(0, 16).replace(/[-:]/g, "");
+  let part;
+  if (range.from && range.to) part = `${stamp(range.from)}_to_${stamp(range.to)}`;
+  else if (range.from) part = `since_${stamp(range.from)}`;
+  else part = `last${range.days}d_asof_${now()}`;
+  return `${DATASET}_${part}.${ext}`;
+}
+
+function csvCell(v) {
+  const s = v == null ? "" : String(v);
+  return /[",\n\r]/.test(s) ? `"${s.replace(/"/g, '""')}"` : s;
+}
+
+async function exportRows(url, env) {
+  const key = url.searchParams.get("k") || "";
+  if (!env.STATS_TOKEN || !safeEqual(key, env.STATS_TOKEN)) {
+    return new Response("nope", { status: 403 });
+  }
+  if (!env.CF_ACCOUNT_ID || !env.CF_API_TOKEN) {
+    return new Response("Set CF_ACCOUNT_ID and CF_API_TOKEN first.", { status: 500 });
+  }
+
+  const range = parseRange(url);
+  const limit = Math.min(MAX_EXPORT_ROWS, Math.max(1, parseInt(url.searchParams.get("limit") || String(MAX_EXPORT_ROWS), 10)));
+  const offset = Math.max(0, parseInt(url.searchParams.get("offset") || "0", 10));
+  const format = (url.searchParams.get("format") || "csv").toLowerCase();
+
+  const select = EXPORT_COLUMNS.map(([name, col]) => `${col} AS ${name}`).join(", ");
+  let rows;
+  try {
+    rows = await sql(env, `
+      SELECT ${select} FROM ${DATASET}
+      WHERE ${range.where}
+      ORDER BY timestamp DESC LIMIT ${limit} OFFSET ${offset}`);
+  } catch (e) {
+    return new Response(`export failed: ${e.message}`, { status: 500 });
+  }
+
+  // A full page means there are probably more rows; say so rather than let the
+  // file look complete. Callers page with &offset=.
+  const truncated = rows.length >= limit;
+  const headers = {
+    "Cache-Control": "no-store",
+    "X-Export-Rows": String(rows.length),
+    "X-Export-Truncated": String(truncated),
+    ...(truncated ? { "X-Export-Next-Offset": String(offset + rows.length) } : {}),
+  };
+
+  if (format === "json") {
+    return new Response(JSON.stringify({ dataset: DATASET, range: range.label, offset, rows: rows.length, truncated, data: rows }, null, 2), {
+      headers: {
+        ...headers,
+        "Content-Type": "application/json;charset=UTF-8",
+        "Content-Disposition": `attachment; filename="${exportFilename(range, "json")}"`,
+      },
+    });
+  }
+
+  const names = EXPORT_COLUMNS.map(([n]) => n);
+  const body = [names.join(",")]
+    .concat(rows.map((r) => names.map((n) => csvCell(r[n])).join(",")))
+    .join("\r\n");
+  return new Response(body + "\r\n", {
+    headers: {
+      ...headers,
+      "Content-Type": "text/csv;charset=UTF-8",
+      "Content-Disposition": `attachment; filename="${exportFilename(range, "csv")}"`,
+    },
+  });
+}
+
 /* ---------------- rendering ---------------- */
 
 const esc = s => String(s == null ? "" : s)
@@ -198,6 +324,20 @@ const esc = s => String(s == null ? "" : s)
 const n0 = v => Math.round(Number(v) || 0).toLocaleString("en-US");
 const n1 = v => (Number(v) || 0).toFixed(1);
 const pct = (a, b) => (!b ? "—" : Math.round((Number(a) / Number(b)) * 100) + "%");
+
+// Keeps the active range on links that leave the page (export, quick ranges).
+// Quick ranges resolve to explicit windows so clicking one fills both pickers
+// and pins the window, rather than drifting on each reload.
+const nowIso = () => new Date().toISOString().slice(0, 19);
+const agoIso = (days) => new Date(Date.now() - days * 86400000).toISOString().slice(0, 19);
+
+function rangeQuery(range) {
+  if (range.from && range.to) {
+    return `from=${encodeURIComponent(range.from)}&to=${encodeURIComponent(range.to)}`;
+  }
+  if (range.from) return `from=${encodeURIComponent(range.from)}`;
+  return `d=${range.days ?? 30}`;
+}
 
 function bar(value, max) {
   const w = !max ? 0 : Math.max(1, Math.round((Number(value) / Number(max)) * 100));
@@ -209,8 +349,7 @@ function render(d) {
   const opened = Number(f.opened) || 0;
   const dur = Number(w.dur) || 0;
 
-  // Ranked lists: bar length is relative to the leader, not to a session total —
-  // these are magnitude comparisons within the list, not parts of a whole.
+  // Bars are relative to the leader: magnitude, not parts of a whole.
   const gwMax = Number(d.gateways[0]?.sessions) || 0;
   const ctMax = Number(d.countries[0]?.sessions) || 0;
 
@@ -220,7 +359,7 @@ function render(d) {
   const totalWatched = Number(st.total_watched) || 0;
   const perSession = endedSessions ? totalStalls / endedSessions : 0;
   const perMinute = totalWatched ? totalStalls / (totalWatched / 60) : 0;
-  // Share of the session spent stalled, medians over sessions (not a ratio of sums).
+  // Median over sessions, not a ratio of sums.
   const medWatched = Number(w.med_watched) || 0;
   const medStalled = Number(st.med_stalled) || 0;
   const medShare = medWatched + medStalled > 0
@@ -237,8 +376,22 @@ function render(d) {
     <p class=eyebrow>Swarm · in-browser streaming · closed distribution</p>
     <h1 class=title>Streaming POC — Viewership</h1>
     <div class=rule></div>
-    <p class=meta>Last ${d.days} days · ${n0(f.sessions)} sessions · updated ${esc(new Date().toISOString().slice(0, 16).replace("T", " "))} UTC</p>
+    <p class=meta>${esc(d.range.label)} · ${n0(f.sessions)} sessions · updated ${esc(new Date().toISOString().slice(0, 16).replace("T", " "))} UTC</p>
   </header>
+
+  <section>
+    <h2>Time range</h2>
+    <form class=range method=get action="/stats">
+      <input type=hidden name=k value="${esc(d.k)}">
+      <label>From <input type=datetime-local name=from value="${esc(d.range.from ? d.range.from.slice(0, 16).replace(" ", "T") : "")}"></label>
+      <label>To <input type=datetime-local name=to value="${esc(d.range.to ? d.range.to.slice(0, 16).replace(" ", "T") : "")}"></label>
+      <button type=submit>Apply</button>
+    </form>
+    <p class=note>Times are UTC, matching the stored rows. Leave “to” empty for
+    “everything since”. Quick ranges: ${[1, 7, 30, 90].map(n =>
+      `<a href="/stats?k=${encodeURIComponent(d.k)}&amp;from=${encodeURIComponent(agoIso(n))}&amp;to=${encodeURIComponent(nowIso())}">${n}d</a>`).join(" · ")}.
+    Analytics Engine keeps ~90 days, so earlier ranges return nothing.</p>
+  </section>
 
   <section>
     <h2>Funnel</h2>
@@ -277,6 +430,7 @@ function render(d) {
           <td class=num>${medShare}</td><td></td></tr>
       <tr><th>Worst session</th><td class=num>${n1(st.worst_stalled)} s</td><td></td><td></td></tr>
       <tr><th>Median startup wait</th><td class=num>${n1(st.med_ttff)} s</td><td></td><td></td></tr>
+      <tr><th>Median peers connected</th><td class=num>${n1(st.med_peers)}</td><td></td><td></td></tr>
     </table>
     <p class=note>Aggregates above count <strong>finished</strong> sessions only —
     a session still playing has no final row yet. The table below includes sessions in
@@ -343,6 +497,10 @@ function render(d) {
   </section>
 
   <p class=foot>This counts our own player only. Anyone fetching the video hash directly, or opening it through another gateway in their own player, does not appear here. A lower bound, not a headcount.</p>
+  <p class=foot>Export: ${["csv", "json"].map(f =>
+    `<a href="/export?k=${encodeURIComponent(d.k)}&amp;${rangeQuery(d.range)}&amp;format=${f}">${f.toUpperCase()}</a>`).join(" · ")}
+    — raw rows for this window, up to 10,000 per request (page with <code>&amp;offset=</code>).
+    Analytics Engine keeps ~90 days, so export on a schedule if you need an archive.</p>
   <p class=foot>Range: ${[7, 30, 90].map(n =>
     `<a href="?k=${encodeURIComponent(d.k)}&amp;d=${n}">${n} days</a>`).join(" · ")}</p>`;
 }
@@ -378,7 +536,15 @@ tr:last-child td,tr:last-child th{border-bottom:0}
 th{font-size:13px;color:var(--ink)}
 .hdr th{font-size:9.5px;font-weight:600;text-transform:uppercase;letter-spacing:.1em;color:var(--muted)}
 .num{text-align:right;font-family:var(--mono);font-variant-numeric:tabular-nums;white-space:nowrap}
-.barcell{width:32%}\n.barcell-sm{width:34%;padding-left:12px}
+.barcell{width:32%}
+form.range{display:flex;flex-wrap:wrap;gap:12px;align-items:flex-end}
+form.range label{display:flex;flex-direction:column;gap:5px;font-size:11px;
+text-transform:uppercase;letter-spacing:.1em;color:var(--muted)}
+form.range input{background:var(--bg);border:1px solid var(--line);border-radius:6px;
+color:var(--ink);padding:7px 9px;font:inherit;font-size:13px;color-scheme:dark}
+form.range button{background:var(--accent);color:#1a1000;border:0;border-radius:6px;
+padding:8px 16px;font:inherit;font-size:13px;font-weight:600;cursor:pointer}
+form.range button:hover{filter:brightness(1.08)}\n.barcell-sm{width:34%;padding-left:12px}
 .bar{display:block;height:10px;background:var(--track);border-radius:0 5px 5px 0}
 .bar i{display:block;height:100%;background:var(--accent);border-radius:0 4px 4px 0}
 .small td{font-size:12.5px;color:var(--ink2)}

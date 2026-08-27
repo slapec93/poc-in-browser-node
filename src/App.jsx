@@ -3,15 +3,36 @@ import Hls from "hls.js";
 import { useSwarmNode } from "./useSwarmNode.js";
 import { parseWatchUrl, makeLiveResolver } from "./swarmFeed.js";
 import { createLiveLoaders } from "./swarmHlsLive.js";
-import { trackPlayback } from "./telemetry.js";
+import { createTelemetry } from "swarm-stream-telemetry";
 
-const EXAMPLE_STREAM =
-  "https://streamoverswarm.eth.limo/#/watch/video/6F2728386F8a47ef5EBe323721188e630Ff0FdE9/0d216633-3475-4c26-8dd0-9935ef854bbc";
+// One owner publishes all streams, so a bare uuid addresses one.
+const STREAM_BASE =
+  "https://streamoverswarm.eth.limo/#/watch/video/6F2728386F8a47ef5EBe323721188e630Ff0FdE9/";
 
-// A real, currently-live Swarm mainnet bytes reference: one ~1.8 MB MPEG-TS
-// segment. weeb-3 0.0.32x decodes its erasure coding natively in retrieveBytes.
-const DEFAULT_ADDRESS =
-  "68d3d40b39d5f17532e928a4b62f2a58ea1b63e20da0eb4b8a7da78d45d45812";
+const EXAMPLE_STREAM = STREAM_BASE + "0d216633-3475-4c26-8dd0-9935ef854bbc";
+
+// ?v= / ?video= / ?stream=: full watch URL or bare uuid. Reads raw href, not
+// URLSearchParams — a watch URL's "#" hides half the value in location.hash.
+function streamFromLocation() {
+  const m = /[?&](?:v|video|stream)=([^&]*)/.exec(location.href);
+  if (!m || !m[1]) return null;
+  let value = m[1].trim();
+  try {
+    value = decodeURIComponent(value);
+  } catch {
+    /* keep the raw value if it isn't valid percent-encoding */
+  }
+  if (!value) return null;
+  // Already a watch URL (however it arrived) — use it verbatim.
+  if (/watch\/video\//.test(value)) return value;
+  // Otherwise treat it as a video id under the known owner.
+  return STREAM_BASE + value.replace(/^\/+/, "");
+}
+
+// Overridable at build time so a fork can point elsewhere.
+const TELEMETRY_ENDPOINT =
+  import.meta.env?.VITE_TELEMETRY_ENDPOINT ||
+  "https://streaming-poc-collector.bekegerg.workers.dev/e";
 
 const PHASE_LABEL = {
   booting: "Booting wasm runtime…",
@@ -29,77 +50,40 @@ async function retrieveContent(node, hex) {
   return u.length >= SPAN ? u.subarray(SPAN) : u;
 }
 
-function toHexPreview(bytes, max = 64) {
-  let hex = "";
-  for (const b of bytes.subarray(0, max)) hex += b.toString(16).padStart(2, "0");
-  return hex + (bytes.length > max ? "…" : "");
-}
-function sniffType(b) {
-  if (!b.length) return null;
-  if (b[0] === 0x47) return "MPEG-TS video segment (.ts)";
-  if (b[0] === 0x89 && b[1] === 0x50) return "PNG image";
-  if (b[0] === 0xff && b[1] === 0xd8) return "JPEG image";
-  if (b[0] === 0x23 && b[1] === 0x21) return "shell script / playlist";
-  return null;
-}
-function formatBytes(n) {
-  if (n < 1024) return `${n} B`;
-  if (n < 1024 * 1024) return `${(n / 1024).toFixed(1)} KiB`;
-  return `${(n / 1024 / 1024).toFixed(2)} MiB`;
-}
-
 export default function App() {
   const { node, phase, connections, error } = useSwarmNode();
-
-  // ---- reconstruct a single bytes address ----
-  const [address, setAddress] = useState(DEFAULT_ADDRESS);
-  const [fetching, setFetching] = useState(false);
-  const [result, setResult] = useState(null);
-  const [fetchError, setFetchError] = useState(null);
-
-  async function handleFetch(e) {
-    e.preventDefault();
-    if (!node || !address.trim()) return;
-    setFetching(true);
-    setResult(null);
-    setFetchError(null);
-    const started = performance.now();
-    try {
-      const bytes = await retrieveContent(node, address.trim()); // native erasure decode
-      if (!bytes || bytes.length === 0) throw new Error("empty result (0 bytes)");
-      const elapsedMs = performance.now() - started;
-      setResult({
-        length: bytes.length,
-        elapsedMs,
-        kbps: bytes.length / 1024 / (elapsedMs / 1000),
-        type: sniffType(bytes),
-        hex: toHexPreview(bytes),
-      });
-    } catch (err) {
-      setFetchError(err instanceof Error ? err.message : String(err));
-    } finally {
-      setFetching(false);
-    }
-  }
-  const canFetch = !!node && !fetching && address.trim().length > 0;
 
   // ---- stream playback (feed via SOC probing, segments via native retrieveBytes) ----
   const videoRef = useRef(null);
   const hlsRef = useRef(null);
   const trackerRef = useRef(null);
-  const [streamUrl, setStreamUrl] = useState(EXAMPLE_STREAM);
+  // Resolved before first render so the field shows what will play.
+  const [urlParamStream] = useState(() => streamFromLocation());
+  const [streamUrl, setStreamUrl] = useState(urlParamStream ?? EXAMPLE_STREAM);
   const [streamStatus, setStreamStatus] = useState(null);
   const [streaming, setStreaming] = useState(false);
   const [segLog, setSegLog] = useState([]);
+  // Autoplay ?v= once the node is up. Ref-guarded so re-renders can't restart it.
+  const autoStartedRef = useRef(false);
+  useEffect(() => {
+    if (!node || !urlParamStream || autoStartedRef.current) return;
+    autoStartedRef.current = true;
+    startStream(urlParamStream);
+  }, [node]); // eslint-disable-line react-hooks/exhaustive-deps
+
   useEffect(() => () => {
     trackerRef.current?.stop();
     hlsRef.current?.destroy();
   }, []);
 
-  async function handlePlay(e) {
+  function handlePlay(e) {
     e.preventDefault();
-    if (!node || !streamUrl.trim()) return;
-    const parsed = parseWatchUrl(streamUrl.trim());
+    startStream(streamUrl);
+  }
+
+  async function startStream(url) {
+    if (!node || !url || !url.trim()) return;
+    const parsed = parseWatchUrl(url.trim());
     if (!parsed) {
       setStreamStatus("Not a recognizable /watch/video/<owner>/<uuid> URL.");
       return;
@@ -129,7 +113,11 @@ export default function App() {
       hlsRef.current?.destroy();
       // One tracker per playback attempt; the previous one flushes its `end` row.
       trackerRef.current?.stop();
-      trackerRef.current = trackPlayback(videoRef.current, { vid: parsed.uuid });
+      trackerRef.current = createTelemetry({
+        endpoint: TELEMETRY_ENDPOINT,
+        vid: parsed.uuid,
+        node, // lets it report peer count alongside playback
+      }).attach(videoRef.current);
       const hls = new Hls({
         pLoader: PlaylistLoader,
         fLoader: FragmentLoader,
@@ -174,35 +162,6 @@ export default function App() {
         </div>
         {error && <p className="err">Boot error: {error.message}</p>}
       </section>
-
-      <section className="card">
-        <form onSubmit={handleFetch}>
-          <label className="field">
-            <span>Bytes address (hex root reference — may be erasure-coded)</span>
-            <input type="text" value={address} onChange={(e) => setAddress(e.target.value)} spellCheck={false} autoComplete="off" />
-          </label>
-          <button type="submit" disabled={!canFetch}>{fetching ? "Retrieving…" : "Retrieve bytes"}</button>
-          {phase !== "ready" && <span className="hint">Node isn’t fully connected yet — may be slow or fail.</span>}
-        </form>
-      </section>
-
-      {fetchError && (
-        <section className="card"><p className="err">Retrieval failed: {fetchError}</p></section>
-      )}
-
-      {result && (
-        <section className="card result">
-          <h2>Result</h2>
-          <div className="grid">
-            <div><span className="k">Size</span><span className="v">{formatBytes(result.length)}</span></div>
-            <div><span className="k">Time</span><span className="v">{result.elapsedMs.toFixed(0)} ms</span></div>
-            <div><span className="k">Throughput</span><span className="v">{result.kbps.toFixed(1)} KB/s</span></div>
-          </div>
-          <p className="baseline">{result.type ? `Detected: ${result.type}.` : ""}</p>
-          <h3>Hex preview</h3>
-          <pre className="mono">{result.hex}</pre>
-        </section>
-      )}
 
       <section className="card">
         <h2>Watch a stream</h2>

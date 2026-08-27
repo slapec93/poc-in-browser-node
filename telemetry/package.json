@@ -1,0 +1,17 @@
+{
+  "name": "swarm-stream-telemetry",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Drop-in playback telemetry for Swarm video pages, with or without a weeb-3 node.",
+  "type": "module",
+  "main": "./src/index.js",
+  "module": "./src/index.js",
+  "exports": {
+    ".": "./src/index.js",
+    "./auto": "./src/auto.js"
+  },
+  "files": ["src", "dist", "README.md"],
+  "scripts": {
+    "build": "node build.js"
+  }
+}
