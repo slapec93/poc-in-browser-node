@@ -501,8 +501,7 @@ function render(d) {
     `<a href="/export?k=${encodeURIComponent(d.k)}&amp;${rangeQuery(d.range)}&amp;format=${f}">${f.toUpperCase()}</a>`).join(" · ")}
     — raw rows for this window, up to 10,000 per request (page with <code>&amp;offset=</code>).
     Analytics Engine keeps ~90 days, so export on a schedule if you need an archive.</p>
-  <p class=foot>Range: ${[7, 30, 90].map(n =>
-    `<a href="?k=${encodeURIComponent(d.k)}&amp;d=${n}">${n} days</a>`).join(" · ")}</p>`;
+`;
 }
 
 function page(body) {
