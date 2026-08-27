@@ -509,6 +509,7 @@ function page(body) {
   return `<!doctype html><html lang=en><head><meta charset=utf-8>
 <meta name=viewport content="width=device-width,initial-scale=1">
 <meta name=robots content="noindex,nofollow"><title>Streaming POC — Viewership</title>
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='7' fill='%230d1216'/%3E%3Crect x='6.5' y='17' width='4.5' height='9' rx='1.5' fill='%23fe6e00'/%3E%3Crect x='13.75' y='11' width='4.5' height='15' rx='1.5' fill='%23fe6e00'/%3E%3Crect x='21' y='6' width='4.5' height='20' rx='1.5' fill='%23fe6e00'/%3E%3C/svg%3E">
 <style>
 :root{color-scheme:dark;
 --bg:#0d1216;--card:#1f2831;--line:#2d3843;

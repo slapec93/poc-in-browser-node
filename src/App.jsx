@@ -34,6 +34,28 @@ const TELEMETRY_ENDPOINT =
   import.meta.env?.VITE_TELEMETRY_ENDPOINT ||
   "https://streaming-poc-collector.bekegerg.workers.dev/e";
 
+// Internal phase: telemetry on for everyone, not switchable. Set to false to
+// restore the public opt-in flow below — default off, user-controlled, sticky.
+const TELEMETRY_ALWAYS_ON = true;
+
+// Opt-in storage, used when TELEMETRY_ALWAYS_ON is false. Absent or unreadable
+// storage means no consent — never assume yes.
+const CONSENT_KEY = "swarm-telemetry-consent";
+function readConsent() {
+  try {
+    return localStorage.getItem(CONSENT_KEY) === "1";
+  } catch {
+    return false;
+  }
+}
+function writeConsent(on) {
+  try {
+    localStorage.setItem(CONSENT_KEY, on ? "1" : "0");
+  } catch {
+    /* private mode: the choice holds for this session only */
+  }
+}
+
 const PHASE_LABEL = {
   booting: "Booting wasm runtime…",
   connecting: "Connecting to peers…",
@@ -62,6 +84,7 @@ export default function App() {
   const [streamUrl, setStreamUrl] = useState(urlParamStream ?? EXAMPLE_STREAM);
   const [streamStatus, setStreamStatus] = useState(null);
   const [streaming, setStreaming] = useState(false);
+  const [consent, setConsent] = useState(() => (TELEMETRY_ALWAYS_ON ? true : readConsent()));
   const [segLog, setSegLog] = useState([]);
   // Autoplay ?v= once the node is up. Ref-guarded so re-renders can't restart it.
   const autoStartedRef = useRef(false);
@@ -70,6 +93,26 @@ export default function App() {
     autoStartedRef.current = true;
     startStream(urlParamStream);
   }, [node]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  // Toggling mid-playback takes effect immediately: withdrawing stops without a
+  // final beacon, granting starts measuring from that point (not retroactively).
+  useEffect(() => {
+    // Don't persist during the internal phase: leaves the stored preference
+    // untouched for when the opt-in flow comes back.
+    if (!TELEMETRY_ALWAYS_ON) writeConsent(consent);
+    if (!consent) {
+      trackerRef.current?.stop({ silent: true });
+      trackerRef.current = null;
+      return;
+    }
+    if (!trackerRef.current && videoRef.current && !videoRef.current.paused) {
+      trackerRef.current = createTelemetry({
+        endpoint: TELEMETRY_ENDPOINT,
+        vid: parseWatchUrl(streamUrl)?.uuid || "",
+        node,
+      }).attach(videoRef.current);
+    }
+  }, [consent]); // eslint-disable-line react-hooks/exhaustive-deps
 
   useEffect(() => () => {
     trackerRef.current?.stop();
@@ -113,11 +156,13 @@ export default function App() {
       hlsRef.current?.destroy();
       // One tracker per playback attempt; the previous one flushes its `end` row.
       trackerRef.current?.stop();
-      trackerRef.current = createTelemetry({
-        endpoint: TELEMETRY_ENDPOINT,
-        vid: parsed.uuid,
-        node, // lets it report peer count alongside playback
-      }).attach(videoRef.current);
+      if (consent) {
+        trackerRef.current = createTelemetry({
+          endpoint: TELEMETRY_ENDPOINT,
+          vid: parsed.uuid,
+          node, // lets it report peer count alongside playback
+        }).attach(videoRef.current);
+      }
       const hls = new Hls({
         pLoader: PlaylistLoader,
         fLoader: FragmentLoader,
@@ -179,6 +224,21 @@ export default function App() {
           {phase !== "ready" && <span className="hint">Node isn’t fully connected yet.</span>}
         </form>
         {streamStatus && <p className="baseline" style={{ marginTop: 14 }}>{streamStatus}</p>}
+        <label className={`consent${TELEMETRY_ALWAYS_ON ? " consent-locked" : ""}`}>
+          <input
+            type="checkbox"
+            checked={consent}
+            disabled={TELEMETRY_ALWAYS_ON}
+            onChange={(e) => setConsent(e.target.checked)}
+          />
+          <span>
+            Playback stats — watch time, stalls, startup wait, peer count. No IP or
+            personal data.{" "}
+            {TELEMETRY_ALWAYS_ON
+              ? "Always on during internal testing."
+              : `${consent ? "On" : "Off"}; your choice is remembered.`}
+          </span>
+        </label>
         <video ref={videoRef} controls playsInline muted style={{ width: "100%", marginTop: 14, borderRadius: 8, background: "#000", aspectRatio: "16 / 9" }} />
         {segLog.length > 0 && (
           <>

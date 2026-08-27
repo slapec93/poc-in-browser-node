@@ -60,6 +60,25 @@ function resolveVid() {
   }
 }
 
+// Fallback when the URL carries no id: the media file name, else the page path.
+// MSE sources are blob: URLs, unique per session and useless as an id.
+function resolveVidFromElement(el) {
+  const src = el?.currentSrc || el?.src || "";
+  if (src && !/^(blob|mediasource):/.test(src)) {
+    try {
+      const name = new URL(src, location.href).pathname.split("/").filter(Boolean).pop();
+      if (name) return name.slice(0, 64);
+    } catch {
+      /* fall through to the path */
+    }
+  }
+  try {
+    return (location.pathname.replace(/^\/+|\/+$/g, "") || location.host || "").slice(0, 64);
+  } catch {
+    return "";
+  }
+}
+
 function resolveLabel() {
   try {
     const m = /[?&]l=([^&]*)/.exec(location.href);
@@ -321,6 +340,7 @@ export function createTelemetry(options = {}) {
     if (!el || video === el) return handle;
     if (video) detachListeners();
     video = el;
+    if (!base.vid) base.vid = resolveVidFromElement(el);
     lastTime = video.currentTime || 0;
     for (const [ev, fn] of LISTENERS) video.addEventListener(ev, fn);
     window.addEventListener("pagehide", onPageHide);
@@ -357,7 +377,9 @@ export function createTelemetry(options = {}) {
     return handle;
   }
 
-  function stop() {
+  // silent: true detaches without a final row — for consent being withdrawn,
+  // where one more beacon is the opposite of what was asked.
+  function stop({ silent = false } = {}) {
     if (state.stopped) return;
     state.stopped = true;
     // Bank a hang in progress, else giving up mid-stall reports zero.
@@ -365,7 +387,7 @@ export function createTelemetry(options = {}) {
     stopPolling();
     stopHeartbeat();
     stopPeerSampling();
-    send("end");
+    if (!silent) send("end");
     detachListeners();
     window.removeEventListener("pagehide", onPageHide);
     document.removeEventListener("visibilitychange", onVisibility);

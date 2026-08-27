@@ -179,3 +179,31 @@ button:disabled {
   white-space: pre-wrap;
   word-break: break-all;
 }
+
+.consent {
+  display: flex;
+  align-items: flex-start;
+  gap: 9px;
+  margin-top: 14px;
+  padding: 11px 13px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  cursor: pointer;
+  font-size: 13px;
+  color: var(--muted);
+  line-height: 1.45;
+}
+.consent input {
+  margin: 2px 0 0;
+  accent-color: var(--accent);
+  cursor: pointer;
+  flex: none;
+}
+
+.consent-locked {
+  cursor: default;
+  opacity: 0.8;
+}
+.consent-locked input {
+  cursor: default;
+}
