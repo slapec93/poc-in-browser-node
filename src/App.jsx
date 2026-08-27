@@ -11,6 +11,22 @@ const STREAM_BASE =
 
 const EXAMPLE_STREAM = STREAM_BASE + "0d216633-3475-4c26-8dd0-9935ef854bbc";
 
+// Owner baked into STREAM_BASE. A stream from this owner needs only its uuid in
+// ?v=; anything else must carry the whole URL or the owner would be lost.
+const BASE_OWNER = (parseWatchUrl(STREAM_BASE + "0".repeat(36))?.owner || "").toLowerCase();
+
+// Reflect what is playing into ?v= so the address bar is shareable. Existing
+// params (?l=) are preserved; replaceState, so replays don't stack history.
+function syncUrlParam(parsed, rawUrl) {
+  try {
+    const params = new URLSearchParams(location.search);
+    params.set("v", parsed.owner === BASE_OWNER ? parsed.uuid : rawUrl.trim());
+    history.replaceState(null, "", `${location.pathname}?${params}${location.hash}`);
+  } catch {
+    /* a failed URL rewrite must not stop playback */
+  }
+}
+
 // ?v= / ?video= / ?stream=: full watch URL or bare uuid. Reads raw href, not
 // URLSearchParams — a watch URL's "#" hides half the value in location.hash.
 function streamFromLocation() {
@@ -131,6 +147,7 @@ export default function App() {
       setStreamStatus("Not a recognizable /watch/video/<owner>/<uuid> URL.");
       return;
     }
+    syncUrlParam(parsed, url);
     setStreaming(true);
     setSegLog([]);
     setStreamStatus("Resolving feed…");
